@@ -1,11 +1,21 @@
 print("4787858")
 from flask import Flask
 from threading import Thread
+
 import sqlite3
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 import os
+
+import asyncio
+
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaPhoto,
+    InputMediaVideo
+)
 
 TOKEN = os.getenv("BOT_TOKEN")
 
@@ -109,12 +119,17 @@ user_map = {}        # user_id -> chat_id
 nicknames = {}       # user_id -> name
 blocked_users = set()
 
+user_info = {}   # user_id -> اطلاعات کاربر
+
 pending_action = {}  # admin_id -> {"type": ..., "user_id": ...}
+
+media_groups = {}     # media_group_id -> لیست فایل‌ها
+media_tasks = {}      # media_group_id -> task
 
 
 # ───────── START ─────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("دلام به ربات یونزونیسم خوش اومدین💗 هر حرف و پیشنهادی دارین میتونید اینجا بهمون بگید.")
+    await update.message.reply_text("ناک ناک..")
 
 
 # ───────── USER MESSAGE ─────────
@@ -133,8 +148,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     first_name = update.effective_user.first_name
     nickname = get_nickname(user_id)
+    display_name = nickname if nickname != "ثبت نشده" else first_name
 
     username = update.effective_user.username
+    user_info[user_id] = {
+        "first_name": first_name,
+        "username": username,
+    }
 
     caption_info = (
         f"👤 کاربر:\n"
@@ -144,18 +164,52 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"ID: {user_id}"
     )
     user_caption = update.message.caption or ""
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("💬 پاسخ", callback_data=f"reply:{user_id}"),
-            InlineKeyboardButton("🚫 بلاک", callback_data=f"block:{user_id}")
-        ],
-        [
-            InlineKeyboardButton("✅ آنبلاک", callback_data=f"unblock:{user_id}")
-        ],
-        [
-            InlineKeyboardButton("✏️ تغییر اسم", callback_data=f"rename:{user_id}")
-        ]
-    ])
+
+    keyboard = get_main_keyboard(user_id, display_name, username)
+
+    # ───────── MEDIA GROUP ─────────
+    if update.message.media_group_id:
+
+        media_group_id = update.message.media_group_id
+
+        if media_group_id not in media_groups:
+
+            media_groups[media_group_id] = {
+                "media": [],
+                "keyboard": keyboard,
+                "caption": user_caption,
+                "user_id": user_id,
+                "first_name": first_name,
+                "username": username,
+            }
+        
+        if update.message.photo:
+
+            media_groups[media_group_id]["media"].append(
+                InputMediaPhoto(
+                    media=update.message.photo[-1].file_id,
+                    caption=user_caption if len(media_groups[media_group_id]["media"]) == 0 else None
+                )
+            )
+
+        elif update.message.video:
+
+            media_groups[media_group_id]["media"].append(
+                InputMediaVideo(
+                    media=update.message.video.file_id,
+                    caption=user_caption if len(media_groups[media_group_id]["media"]) == 0 else None
+                )
+            )
+
+        if media_group_id not in media_tasks:
+
+            media_tasks[media_group_id] = asyncio.create_task(
+                send_media_group(media_group_id, context)
+            )
+
+        await update.message.reply_text("دلام به ربات یونزونیسم خوش اومدین💗 هر حرف و پیشنهادی دارین میتونید اینجا بهمون بگید.")
+
+        return
 
     # متن
     if update.message.text:
@@ -168,10 +222,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=keyboard
             )
 
-            await context.bot.send_message(
-                chat_id=admin,
-                text=caption_info
-            )
 
     # عکس
     elif update.message.photo:
@@ -183,16 +233,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_photo(
                 chat_id=admin,
                 photo=photo,
-                caption=f"{user_caption}",
+                caption=user_caption,
                 reply_markup=keyboard
             )
-
-            await context.bot.send_message(
-                chat_id=admin,
-                text=caption_info
-            )
-
-    # ویدیو
     elif update.message.video:
 
         video = update.message.video.file_id
@@ -202,13 +245,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_video(
                 chat_id=admin,
                 video=video,
-                caption=f"{user_caption}",
+                caption=user_caption,
                 reply_markup=keyboard
-            )
-
-            await context.bot.send_message(
-                chat_id=admin,
-                text=caption_info
             )
 
     # ویس
@@ -225,11 +263,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=keyboard
             )
 
-            await context.bot.send_message(
-                chat_id=admin,
-                text=caption_info
-            )
-
     # موزیک
     elif update.message.audio:
 
@@ -244,11 +277,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=keyboard
             )
 
-            await context.bot.send_message(
-                chat_id=admin,
-                text=caption_info
-            )
-        #استیکر
+    #استیکر
     elif update.message.sticker:
 
         sticker = update.message.sticker.file_id
@@ -279,10 +308,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=keyboard
             )
 
-            await context.bot.send_message(
-                chat_id=admin,
-                text=caption_info
-            )
     #فایل
     elif update.message.document:
 
@@ -297,24 +322,159 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=keyboard
             )
 
-            await context.bot.send_message(
-                chat_id=admin,
-                text=caption_info
-            )
 
     await update.message.reply_text("ارسال شد.")
 
+# ─────────  GET MAIN KEYBOARD ─────────
+def get_main_keyboard(user_id, first_name, username):
+    if username:
+        user_button = InlineKeyboardButton(
+            f"👤 {first_name}",
+            url=f"https://t.me/{username}"
+        )
+    else:
+        user_button = InlineKeyboardButton(
+            f"👤 {first_name}",
+            callback_data=f"user:{user_id}"
+        )
+
+    return InlineKeyboardMarkup([
+        [
+            user_button,
+            InlineKeyboardButton(
+                "⚙️ تنظیمات",
+                callback_data=f"settings:{user_id}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "ℹ️ اطلاعات کاربر",
+                callback_data=f"info:{user_id}"
+            )
+        ]
+    ])
+
+
+def get_settings_keyboard(user_id):
+
+    if is_blocked(user_id):
+        block_button = InlineKeyboardButton(
+            "✅ آنبلاک",
+            callback_data=f"unblock:{user_id}"
+        )
+    else:
+        block_button = InlineKeyboardButton(
+            "🚫 بلاک",
+            callback_data=f"block:{user_id}"
+        )
+
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("💬 پاسخ", callback_data=f"reply:{user_id}"),
+            block_button
+        ],
+        [
+            InlineKeyboardButton("✏️ تغییر اسم", callback_data=f"rename:{user_id}"),
+            InlineKeyboardButton("⬅️ بازگشت", callback_data=f"back:{user_id}")
+        ]
+    ])
+# ───────── SEND MEDIA GROUP ─────────
+async def send_media_group(media_group_id, context):
+
+    await asyncio.sleep(0.8)
+
+    data = media_groups.get(media_group_id)
+
+    if data is None:
+        return
+
+    media = data["media"]
+
+    keyboard = get_main_keyboard(
+        data["user_id"],
+        data["first_name"],
+        data["username"]
+    )
+
+    for admin in ADMINS:
+
+        try:
+
+            await context.bot.send_media_group(
+                chat_id=admin,
+                media=media
+            )
+
+            await context.bot.send_message(
+                chat_id=admin,
+                text="⚙️ تنظیمات",
+                reply_markup=keyboard
+            )
+
+        except Exception as e:
+            print(e)
+
+    media_groups.pop(media_group_id, None)
+    media_tasks.pop(media_group_id, None)
 
 # ───────── BUTTON HANDLER ─────────
 async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     query = update.callback_query
     await query.answer()
-
+    
+    print("CALLBACK:", query.data)
+    print("ACTION:", query.data.split(":")[0])
+    
     admin_id = update.effective_user.id
     action, user_id = query.data.split(":")
     user_id = int(user_id)
 
+    if action == "user":
+        await query.answer()
+        return
+
+    elif action == "settings":
+
+        await query.message.edit_reply_markup(
+            reply_markup=get_settings_keyboard(user_id)
+        )
+
+        await query.answer()
+        return
+
+    elif action == "info":
+
+        first_name = user_info.get(user_id, {}).get("first_name", "ندارد")
+        username = user_info.get(user_id, {}).get("username")
+
+        nickname = get_nickname(user_id)
+
+        text = (
+            f"👤 اطلاعات کاربر\n\n"
+            f"نام: {first_name}\n"
+            f"اسم نمایشی: {nickname}\n"
+            f"یوزرنیم: @{username if username else 'ندارد'}\n"
+            f"ID: {user_id}"
+        )
+
+        await query.message.reply_text(text)
+
+        return
+
+    elif action == "back":
+
+        first_name = user_info.get(user_id, {}).get("first_name", "کاربر")
+        username = user_info.get(user_id, {}).get("username")
+        nickname = get_nickname(user_id)
+
+        display_name = nickname if nickname != "ثبت نشده" else first_name
+
+        await query.message.edit_reply_markup(
+            reply_markup=get_main_keyboard(user_id, display_name, username)
+        )
+        await query.answer()
+        return
     if action in ["reply", "rename"]:
 
         pending_action[admin_id] = {
@@ -331,12 +491,36 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "block":
 
         block_user_db(user_id)
-        await query.message.reply_text("🚫 کاربر بلاک شد")
+
+        first_name = user_info.get(user_id, {}).get("first_name", "کاربر")
+        username = user_info.get(user_id, {}).get("username")
+        nickname = get_nickname(user_id)
+
+        display_name = nickname if nickname != "ثبت نشده" else first_name
+
+        await query.message.edit_reply_markup(
+            reply_markup=get_settings_keyboard(user_id)
+        )
+
+        await query.answer("🚫 کاربر بلاک شد", show_alert=True)
+        return
 
     elif action == "unblock":
 
         unblock_user_db(user_id)
-        await query.message.reply_text("✅ کاربر آنبلاک شد")
+
+        first_name = user_info.get(user_id, {}).get("first_name", "کاربر")
+        username = user_info.get(user_id, {}).get("username")
+        nickname = get_nickname(user_id)
+
+        display_name = nickname if nickname != "ثبت نشده" else first_name
+
+        await query.message.edit_reply_markup(
+            reply_markup=get_settings_keyboard(user_id)
+        )
+
+        await query.answer("✅ کاربر آنبلاک شد", show_alert=True)
+        return
 
 
 # ───────── ADMIN TEXT INPUT (AFTER BUTTON) ─────────
