@@ -129,7 +129,7 @@ media_tasks = {}      # media_group_id -> task
 
 # ───────── START ─────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("ناک ناک..")
+    await update.message.reply_text("دلام به ربات یونزونیسم خوش اومدین💗 هر حرف و پیشنهادی دارین میتونید اینجا بهمون بگید.")
 
 
 # ───────── USER MESSAGE ─────────
